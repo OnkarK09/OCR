@@ -680,87 +680,225 @@ export default function App() {
 
     else if (type === 'bill') {
 
-      const finalTotalKeys = ['net amount', 'grand total', 'bill amount', 'payable', 'paid amount'];
+      // Enhanced amount detection with multiple strategies
+      const finalTotalKeys = [
+        'grand total', 'net amount', 'bill amount', 'total amount', 'final amount',
+        'payable', 'paid amount', 'amount payable', 'amount paid', 'amount to pay',
+        'total payable', 'net payable', 'final total', 'balance', 'outstanding'
+      ];
 
-      const genericTotalKeys = ['total', 'amount'];
+      const highPriorityKeys = [
+        'total', 'amount', 'sum', 'subtotal', 'bill total', 'invoice total'
+      ];
 
-      const moneyRegex = /(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)/g; 
+      // Enhanced money regex - handles various formats
+      const moneyRegex = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
+      const simpleMoneyRegex = /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g;
 
       let bestAmount = 0;
-
+      let amountSource = '';
       let foundHighPriority = false;
+      const allAmounts = [];
 
-      lines.forEach((line) => {
-
+      // Strategy 1: Look for final total keywords
+      lines.forEach((line, index) => {
         const text = line.text.toLowerCase();
+        const originalText = line.text;
 
-        const amounts = text.match(moneyRegex);
-
-        if (amounts) {
-
-           const values = amounts.map(a => parseFloat(a.replace(/,/g, ''))).filter(n => !isNaN(n));
-
-           const maxLineVal = Math.max(...values);
-
-           if (finalTotalKeys.some(key => text.includes(key))) {
-
-              if (maxLineVal > bestAmount || !foundHighPriority) {
-
-                 bestAmount = maxLineVal;
-
-                 foundHighPriority = true;
-
-              }
-
-           } 
-
-           else if (!foundHighPriority && genericTotalKeys.some(key => text.includes(key))) {
-
-              if (maxLineVal > bestAmount) {
-
-                 bestAmount = maxLineVal;
-
-              }
-
-           }
-
+        // Try enhanced regex first
+        let amounts = text.match(moneyRegex);
+        if (!amounts || amounts.length === 0) {
+          amounts = originalText.match(simpleMoneyRegex);
         }
 
+        if (amounts && amounts.length > 0) {
+          const values = amounts
+            .map(a => {
+              // Extract number from matches like "Rs. 1,234.56" or "1,234.56"
+              const numStr = a.replace(/[^\d.,]/g, '').replace(/,/g, '');
+              return parseFloat(numStr);
+            })
+            .filter(n => !isNaN(n) && n > 0);
+
+          if (values.length > 0) {
+            const maxLineVal = Math.max(...values);
+            allAmounts.push({ value: maxLineVal, line: originalText, index });
+
+            // Check for final total keywords (highest priority)
+            if (finalTotalKeys.some(key => text.includes(key))) {
+              if (maxLineVal > bestAmount || !foundHighPriority) {
+                bestAmount = maxLineVal;
+                amountSource = 'Final Total';
+                foundHighPriority = true;
+              }
+            }
+            // Check for high priority keywords
+            else if (!foundHighPriority && highPriorityKeys.some(key => text.includes(key))) {
+              if (maxLineVal > bestAmount) {
+                bestAmount = maxLineVal;
+                amountSource = 'Total';
+              }
+            }
+          }
+        }
       });
 
-      
-
-      const ignoreWords = ['tax', 'invoice', 'bill', 'gstin', 'date', 'ph:', 'mo:', 'tin', 'cash', 'memo', 'receipt', 'number', 'no.', 'original', 'duplicate', 'patient', 'name', 'address', 'reg', 'hospital', 'store', 'shop'];
-
-      let storeName = "Unknown Store";
-
-      for (let i = 0; i < Math.min(lines.length, 8); i++) {
-
-        const rawLine = lines[i].text.trim();
-
-        const lowerLine = rawLine.toLowerCase();
-
-        if (rawLine.length < 4) continue;
-
-        if (/^[\d\s.,\/-]+$/.test(rawLine)) continue;
-
-        const hasIgnoreWord = ignoreWords.some(w => lowerLine.startsWith(w) || lowerLine.includes(' ' + w + ' ') || lowerLine.includes('date'));
-
-        if (!hasIgnoreWord) {
-
-           storeName = rawLine;
-
-           break;
-
-        }
-
+      // Strategy 2: If no keyword match, use the largest amount (usually the total)
+      if (!foundHighPriority && allAmounts.length > 0) {
+        allAmounts.sort((a, b) => b.value - a.value);
+        bestAmount = allAmounts[0].value;
+        amountSource = 'Largest Amount';
       }
 
-      data.fields['Store Name'] = storeName;
+      // Strategy 3: Look for amounts at the bottom of the bill (usually totals)
+      if (!foundHighPriority && allAmounts.length > 0) {
+        const bottomAmounts = allAmounts
+          .filter(a => a.index >= Math.floor(lines.length * 0.7))
+          .sort((a, b) => b.value - a.value);
+        
+        if (bottomAmounts.length > 0 && bottomAmounts[0].value > bestAmount * 0.5) {
+          bestAmount = bottomAmounts[0].value;
+          amountSource = 'Bottom Section';
+        }
+      }
 
-      data.fields['Total Amount'] = bestAmount > 0 ? bestAmount.toLocaleString('en-IN', { style: 'currency', currency: 'INR' }) : "Not found";
+      // Enhanced store/medical/hospital name detection
+      const ignoreWords = [
+        'tax', 'invoice', 'bill', 'gstin', 'date', 'ph:', 'mo:', 'tin', 'cash', 
+        'memo', 'receipt', 'number', 'no.', 'original', 'duplicate', 'reg',
+        'amount', 'total', 'subtotal', 'discount', 'gst', 'cgst', 'sgst', 'igst',
+        'qty', 'quantity', 'rate', 'price', 'item', 'description', 'particulars',
+        's.no', 'sr.no', 'sl.no', 's/n', 'time', 'payment', 'mode'
+      ];
 
-      data.success = bestAmount > 0;
+      const medicalKeywords = [
+        'hospital', 'clinic', 'medical', 'pharmacy', 'diagnostic', 'laboratory',
+        'lab', 'health', 'care', 'wellness', 'doctor', 'dr.', 'physician',
+        'surgeon', 'dental', 'dental', 'ayurveda', 'homeopathy', 'unani'
+      ];
+
+      const businessKeywords = [
+        'pvt', 'ltd', 'limited', 'inc', 'corporation', 'corp', 'company',
+        'enterprises', 'traders', 'solutions', 'services'
+      ];
+
+      let storeName = "Unknown Store";
+      let storeType = '';
+      let bestScore = 0;
+
+      // Analyze top 15 lines (usually contains business name)
+      for (let i = 0; i < Math.min(lines.length, 15); i++) {
+        const rawLine = lines[i].text.trim();
+        const lowerLine = rawLine.toLowerCase();
+
+        // Skip if too short or only numbers/symbols
+        if (rawLine.length < 3) continue;
+        if (/^[\d\s.,\/\-:]+$/.test(rawLine)) continue;
+
+        // Skip common header/footer patterns
+        if (/^(invoice|bill|receipt|tax|gst|date|time)/i.test(rawLine)) continue;
+        if (/^(total|amount|subtotal|grand)/i.test(rawLine)) continue;
+        if (/^[A-Z\s]{1,3}$/.test(rawLine)) continue; // Skip single letters/initials
+
+        // Check for ignore words
+        const hasIgnoreWord = ignoreWords.some(w => 
+          lowerLine === w || 
+          lowerLine.startsWith(w + ' ') || 
+          lowerLine.endsWith(' ' + w) ||
+          lowerLine.includes(' ' + w + ' ')
+        );
+
+        if (hasIgnoreWord) continue;
+
+        // Score the line based on various factors
+        let score = 0;
+        let detectedType = '';
+
+        // Medical/Hospital detection
+        const hasMedical = medicalKeywords.some(kw => lowerLine.includes(kw));
+        if (hasMedical) {
+          score += 50;
+          detectedType = 'Medical';
+          // Medical names are usually longer and more descriptive
+          if (rawLine.length > 8 && rawLine.length < 60) score += 20;
+        }
+
+        // Business entity detection
+        const hasBusiness = businessKeywords.some(kw => lowerLine.includes(kw));
+        if (hasBusiness) {
+          score += 30;
+          if (!detectedType) detectedType = 'Business';
+        }
+
+        // Position bonus (top lines are more likely to be business names)
+        if (i < 5) score += 20;
+        if (i < 3) score += 10;
+
+        // Length bonus (business names are usually 5-50 characters)
+        if (rawLine.length >= 5 && rawLine.length <= 50) score += 15;
+        if (rawLine.length >= 10 && rawLine.length <= 40) score += 10;
+
+        // Capitalization bonus (business names often have proper capitalization)
+        const hasProperCase = /^[A-Z][a-z]+(\s+[A-Z][a-z]+)*/.test(rawLine);
+        if (hasProperCase) score += 10;
+
+        // Avoid lines that look like addresses (contain common address words)
+        const addressWords = ['street', 'road', 'lane', 'avenue', 'colony', 'nagar', 'society'];
+        const hasAddress = addressWords.some(w => lowerLine.includes(w));
+        if (hasAddress && score < 40) continue; // Skip if not high confidence
+
+        // If this line scores higher, use it
+        if (score > bestScore) {
+          bestScore = score;
+          storeName = rawLine;
+          storeType = detectedType;
+        }
+
+        // Early exit if we found a high-confidence match
+        if (score >= 60) break;
+      }
+
+      // Format store name
+      if (storeName !== "Unknown Store") {
+        // Clean up common OCR errors
+        storeName = storeName
+          .replace(/\s+/g, ' ') // Multiple spaces to single
+          .replace(/^[^\w]+|[^\w]+$/g, '') // Remove leading/trailing non-word chars
+          .trim();
+      }
+
+      // Format amount with source info
+      let amountDisplay = "Not found";
+      if (bestAmount > 0) {
+        amountDisplay = bestAmount.toLocaleString('en-IN', { 
+          style: 'currency', 
+          currency: 'INR',
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        });
+        if (amountSource) {
+          amountDisplay += ` (${amountSource})`;
+        }
+      }
+
+      // Build result
+      data.fields['Store/Medical Name'] = storeName;
+      if (storeType) {
+        data.fields['Type'] = storeType;
+      }
+      data.fields['Bill Amount'] = amountDisplay;
+      
+      // Additional info if available
+      if (allAmounts.length > 0) {
+        const uniqueAmounts = [...new Set(allAmounts.map(a => a.value))].sort((a, b) => b - a);
+        if (uniqueAmounts.length > 1) {
+          data.fields['Other Amounts Found'] = uniqueAmounts.slice(0, 3).map(a => 
+            a.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })
+          ).join(', ');
+        }
+      }
+
+      data.success = bestAmount > 0 || storeName !== "Unknown Store";
 
     }
 
@@ -870,7 +1008,7 @@ export default function App() {
 
             {activeTab === 'pan' && "Upload PAN. Advanced mode: Uses Whitelist & Fuzzy Regex matching."}
 
-            {activeTab === 'bill' && "Upload Receipt. Scans for 'Net Amount' and Store Name."}
+            {activeTab === 'bill' && "Upload Receipt/Bill. Advanced detection: Medical/Hospital names, Store names, and Bill amounts with multiple strategies."}
 
           </p>
 
