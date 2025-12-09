@@ -684,81 +684,229 @@ export default function App() {
       const finalTotalKeys = [
         'grand total', 'net amount', 'bill amount', 'total amount', 'final amount',
         'payable', 'paid amount', 'amount payable', 'amount paid', 'amount to pay',
-        'total payable', 'net payable', 'final total', 'balance', 'outstanding'
+        'total payable', 'net payable', 'final total', 'balance', 'outstanding',
+        'round off', 'roundoff', 'round-off', 'to pay', 'pay', 'balance amount'
       ];
 
       const highPriorityKeys = [
-        'total', 'amount', 'sum', 'subtotal', 'bill total', 'invoice total'
+        'total', 'amount', 'sum', 'subtotal', 'bill total', 'invoice total',
+        'final', 'net', 'gross total', 'gross amount'
       ];
 
-      // Enhanced money regex - handles various formats
-      const moneyRegex = /(?:Rs\.?|INR|₹)?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi;
-      const simpleMoneyRegex = /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g;
+      // Comprehensive money regex patterns - handles various formats
+      const moneyPatterns = [
+        /(?:Rs\.?|INR|₹|rupees?)\s*:?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/gi,  // Rs. 1,234.56
+        /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)\s*(?:Rs\.?|INR|₹)/gi,  // 1,234.56 Rs
+        /(?:Rs\.?|INR|₹)\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/gi,  // Rs 1234.56
+        /(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?)/g,  // Simple: 1,234.56 or 1234.56
+        /(\d+\.\d{2})/g,  // Decimal format: 1234.56
+        /(\d{4,}(?:\.\d{2})?)/g  // Large numbers without commas: 123456.78
+      ];
 
       let bestAmount = 0;
       let amountSource = '';
       let foundHighPriority = false;
       const allAmounts = [];
+      const keywordMatches = [];
 
-      // Strategy 1: Look for final total keywords
+      // Helper function to extract amount from text
+      const extractAmounts = (text) => {
+        const amounts = [];
+        for (const pattern of moneyPatterns) {
+          const matches = text.match(pattern);
+          if (matches) {
+            matches.forEach(match => {
+              // Extract number from match
+              let numStr = match.replace(/[^\d.,]/g, '');
+              // Handle Indian number format (lakhs, crores) - remove commas
+              numStr = numStr.replace(/,/g, '');
+              const num = parseFloat(numStr);
+              if (!isNaN(num) && num > 0 && num < 100000000) { // Reasonable range
+                amounts.push(num);
+              }
+            });
+          }
+        }
+        return [...new Set(amounts)]; // Remove duplicates
+      };
+
+      // Strategy 1: Look for final total keywords with amounts on same line
       lines.forEach((line, index) => {
         const text = line.text.toLowerCase();
         const originalText = line.text;
 
-        // Try enhanced regex first
-        let amounts = text.match(moneyRegex);
-        if (!amounts || amounts.length === 0) {
-          amounts = originalText.match(simpleMoneyRegex);
-        }
+        // Extract all amounts from this line
+        const amounts = extractAmounts(originalText);
+        
+        if (amounts.length > 0) {
+          const maxLineVal = Math.max(...amounts);
+          allAmounts.push({ value: maxLineVal, line: originalText, index, amounts });
 
-        if (amounts && amounts.length > 0) {
-          const values = amounts
-            .map(a => {
-              // Extract number from matches like "Rs. 1,234.56" or "1,234.56"
-              const numStr = a.replace(/[^\d.,]/g, '').replace(/,/g, '');
-              return parseFloat(numStr);
-            })
-            .filter(n => !isNaN(n) && n > 0);
-
-          if (values.length > 0) {
-            const maxLineVal = Math.max(...values);
-            allAmounts.push({ value: maxLineVal, line: originalText, index });
-
-            // Check for final total keywords (highest priority)
-            if (finalTotalKeys.some(key => text.includes(key))) {
-              if (maxLineVal > bestAmount || !foundHighPriority) {
-                bestAmount = maxLineVal;
-                amountSource = 'Final Total';
-                foundHighPriority = true;
+          // Check for final total keywords (highest priority)
+          const hasFinalKeyword = finalTotalKeys.some(key => {
+            const keywordIndex = text.indexOf(key);
+            if (keywordIndex !== -1) {
+              // Check if amount appears after keyword on same line
+              const afterKeyword = originalText.substring(keywordIndex + key.length);
+              const amountsAfter = extractAmounts(afterKeyword);
+              if (amountsAfter.length > 0) {
+                keywordMatches.push({
+                  value: Math.max(...amountsAfter),
+                  source: 'Final Total (Same Line)',
+                  line: originalText,
+                  index
+                });
+                return true;
               }
+              // Or use the max amount from the line
+              keywordMatches.push({
+                value: maxLineVal,
+                source: 'Final Total (Same Line)',
+                line: originalText,
+                index
+              });
+              return true;
             }
-            // Check for high priority keywords
-            else if (!foundHighPriority && highPriorityKeys.some(key => text.includes(key))) {
-              if (maxLineVal > bestAmount) {
-                bestAmount = maxLineVal;
-                amountSource = 'Total';
+            return false;
+          });
+
+          if (hasFinalKeyword) {
+            if (maxLineVal > bestAmount || !foundHighPriority) {
+              bestAmount = maxLineVal;
+              amountSource = 'Final Total';
+              foundHighPriority = true;
+            }
+          }
+          // Check for high priority keywords
+          else if (!foundHighPriority) {
+            const hasHighPriority = highPriorityKeys.some(key => {
+              const keywordIndex = text.indexOf(key);
+              if (keywordIndex !== -1) {
+                const afterKeyword = originalText.substring(keywordIndex + key.length);
+                const amountsAfter = extractAmounts(afterKeyword);
+                if (amountsAfter.length > 0) {
+                  keywordMatches.push({
+                    value: Math.max(...amountsAfter),
+                    source: 'Total (Same Line)',
+                    line: originalText,
+                    index
+                  });
+                  return true;
+                }
+                keywordMatches.push({
+                  value: maxLineVal,
+                  source: 'Total (Same Line)',
+                  line: originalText,
+                  index
+                });
+                return true;
+              }
+              return false;
+            });
+
+            if (hasHighPriority && maxLineVal > bestAmount) {
+              bestAmount = maxLineVal;
+              amountSource = 'Total';
+            }
+          }
+        }
+      });
+
+      // Strategy 2: Look for amounts on next line after keywords
+      lines.forEach((line, index) => {
+        if (index < lines.length - 1) {
+          const text = line.text.toLowerCase();
+          const nextLine = lines[index + 1];
+          const nextLineText = nextLine.text;
+
+          const hasKeyword = finalTotalKeys.some(key => text.includes(key)) ||
+                           highPriorityKeys.some(key => text.includes(key));
+
+          if (hasKeyword) {
+            const amounts = extractAmounts(nextLineText);
+            if (amounts.length > 0) {
+              const maxVal = Math.max(...amounts);
+              if (!foundHighPriority && finalTotalKeys.some(key => text.includes(key))) {
+                if (maxVal > bestAmount) {
+                  bestAmount = maxVal;
+                  amountSource = 'Final Total (Next Line)';
+                  foundHighPriority = true;
+                }
+              } else if (!foundHighPriority && maxVal > bestAmount) {
+                bestAmount = maxVal;
+                amountSource = 'Total (Next Line)';
               }
             }
           }
         }
       });
 
-      // Strategy 2: If no keyword match, use the largest amount (usually the total)
-      if (!foundHighPriority && allAmounts.length > 0) {
-        allAmounts.sort((a, b) => b.value - a.value);
-        bestAmount = allAmounts[0].value;
-        amountSource = 'Largest Amount';
+      // Strategy 3: Use keyword matches if found
+      if (keywordMatches.length > 0 && !foundHighPriority) {
+        keywordMatches.sort((a, b) => b.value - a.value);
+        const bestMatch = keywordMatches[0];
+        if (bestMatch.value > bestAmount) {
+          bestAmount = bestMatch.value;
+          amountSource = bestMatch.source;
+        }
       }
 
-      // Strategy 3: Look for amounts at the bottom of the bill (usually totals)
+      // Strategy 4: If no keyword match, use the largest amount (usually the total)
+      if (!foundHighPriority && allAmounts.length > 0) {
+        allAmounts.sort((a, b) => b.value - a.value);
+        // Filter out very small amounts (likely item prices)
+        const significantAmounts = allAmounts.filter(a => a.value >= 10);
+        if (significantAmounts.length > 0) {
+          bestAmount = significantAmounts[0].value;
+          amountSource = 'Largest Amount';
+        } else {
+          bestAmount = allAmounts[0].value;
+          amountSource = 'Largest Amount';
+        }
+      }
+
+      // Strategy 5: Look for amounts at the bottom of the bill (usually totals)
       if (!foundHighPriority && allAmounts.length > 0) {
         const bottomAmounts = allAmounts
-          .filter(a => a.index >= Math.floor(lines.length * 0.7))
+          .filter(a => a.index >= Math.floor(lines.length * 0.6))
           .sort((a, b) => b.value - a.value);
         
-        if (bottomAmounts.length > 0 && bottomAmounts[0].value > bestAmount * 0.5) {
-          bestAmount = bottomAmounts[0].value;
-          amountSource = 'Bottom Section';
+        if (bottomAmounts.length > 0) {
+          const bottomAmount = bottomAmounts[0].value;
+          // Use bottom amount if it's significant and close to or larger than current best
+          if (bottomAmount > bestAmount * 0.7 || (bestAmount === 0 && bottomAmount > 0)) {
+            bestAmount = bottomAmount;
+            amountSource = 'Bottom Section';
+          }
+        }
+      }
+
+      // Strategy 6: Look for amounts that appear multiple times (likely totals)
+      if (!foundHighPriority && allAmounts.length > 0) {
+        const amountCounts = {};
+        allAmounts.forEach(a => {
+          // Round to nearest rupee for grouping
+          const rounded = Math.round(a.value);
+          if (!amountCounts[rounded]) {
+            amountCounts[rounded] = { value: a.value, count: 0, lines: [] };
+          }
+          amountCounts[rounded].count++;
+          amountCounts[rounded].lines.push(a.line);
+        });
+
+        // Find amount that appears most often (likely the total)
+        let maxCount = 0;
+        let mostCommonAmount = 0;
+        Object.values(amountCounts).forEach(entry => {
+          if (entry.count > maxCount && entry.value > 0) {
+            maxCount = entry.count;
+            mostCommonAmount = entry.value;
+          }
+        });
+
+        if (maxCount >= 2 && mostCommonAmount > bestAmount * 0.8) {
+          bestAmount = mostCommonAmount;
+          amountSource = 'Most Common Amount';
         }
       }
 
